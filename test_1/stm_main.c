@@ -2,10 +2,11 @@
 #include "math.h"
 #include "stdio.h"
 #include "stdlib.h"
+#include "usb_device.h"
+#include "usbd_cdc_if.h" // USB CDC için gerekli kütüphane
 
-// I2C ve UART tanımlamaları
+// I2C tanımlamaları
 I2C_HandleTypeDef hi2c1; // I2C haberleşmesi için tanımlama
-UART_HandleTypeDef huart1; // UART haberleşmesi için tanımlama
 
 #define ADS1115_ADDRESS 0x48 // ADS1115 I2C adresi
 
@@ -15,7 +16,7 @@ float voltage[4]; // Her kanal için okunan voltajları saklamak için dizi
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_USART1_UART_Init(void);
+static void MX_USB_DEVICE_Init(void); // USB başlatma fonksiyonu
 
 // ADS1115'den voltajları okuyan fonksiyon
 void readADS1115Voltages(float *voltages, I2C_HandleTypeDef *hi2c, uint8_t address) {
@@ -34,7 +35,7 @@ void readADS1115Voltages(float *voltages, I2C_HandleTypeDef *hi2c, uint8_t addre
             case 2: ADSwrite[1] = 0xE2; break; // Kanal A2
             case 3: ADSwrite[1] = 0xF2; break; // Kanal A3
         }
-        ADSwrite[2] = 0xE5; // Örnekleme oranı
+        ADSwrite[2] = 0xE5; // Örnekleme oranı (gram fikrim yok)
         
         // Konfigürasyon ayarlarını ADS1115'e gönder
         HAL_I2C_Master_Transmit(hi2c, address << 1, ADSwrite, 3, 100);
@@ -42,8 +43,8 @@ void readADS1115Voltages(float *voltages, I2C_HandleTypeDef *hi2c, uint8_t addre
         ADSwrite[0] = 0x00; //conversion verisini okumak için adresi ayarlıyoruz
         HAL_I2C_Master_Transmit(hi2c, address << 1, ADSwrite, 1, 100);
 
-        // Ölçüm yapılması için kısa bir gecikme
-        HAL_Delay(5); //hacı bunu 5 yaptım ama düşürüp yükseltip deneriz emin olamadım
+        // Ölçüm yapılması için kısa bir gecikme (değiştirilebilir)
+        HAL_Delay(5);
 
         // Dönüşüm verisini alıyoruz
         HAL_I2C_Master_Receive(hi2c, address << 1, ADSread, 2, 100);
@@ -51,23 +52,23 @@ void readADS1115Voltages(float *voltages, I2C_HandleTypeDef *hi2c, uint8_t addre
         // İki baytlık veriyi birleştirerek 16-bitlik okuma değeri elde ediyoruz
         reading = (ADSread[0] << 8) | ADSread[1];
 
-        // Negatif okumaları sıfırla (opsiyonel güvenlik önlemi için) (real-time olduğu için bu işe yarıyor mu gram fikrim yok)
+        // Negatif okumaları sıfırla (opsiyonel güvenlik önlemi için)
         if (reading < 0) {
             reading = 0;
         }
 
         // Voltaj değeri olarak sakla, her bir ham okuma değeri 0.000125V'a karşılık gelir
-        voltages[i] = reading * 0.000125; //datasheet öyle diyor ???
+        voltages[i] = reading * 0.000125; //datasheet öyle diyor
     }
 }
 
-// UART üzerinden voltaj verilerini gönderme fonksiyonu
+// USB CDC üzerinden voltaj verilerini gönderme fonksiyonu
 void sendVoltageData() {
-    char uartBuf[50]; // UART gönderim tamponu
+    char usbBuf[50]; // USB gönderim tamponu
     for (int i = 0; i < 4; i++) {
-        // Voltaj değerini tamponda formatla ve UART ile gönder
-        int len = sprintf(uartBuf, "Voltage[%d]: %.3f\r\n", i, voltage[i]);
-        HAL_UART_Transmit(&huart1, (uint8_t *)uartBuf, len, 100);
+        // Voltaj değerini tamponda formatla ve USB CDC ile gönder
+        int len = sprintf(usbBuf, "Voltage[%d]: %.3f\r\n", i, voltage[i]);
+        CDC_Transmit_FS((uint8_t *)usbBuf, len); // USB CDC üzerinden veriyi gönder
     }
 }
 
@@ -76,12 +77,34 @@ int main(void) {
     SystemClock_Config(); // Sistem saatini yapılandır
     MX_GPIO_Init(); // GPIO'ları başlat
     MX_I2C1_Init(); // I2C'yi başlat
-    MX_USART1_UART_Init(); // UART'ı başlat
+    MX_USB_DEVICE_Init(); // USB CDC'yi başlat
 
     // Sonsuz döngü
     while (1) {
         readADS1115Voltages(voltage, &hi2c1, ADS1115_ADDRESS); // ADS1115'den voltaj verilerini oku
-        sendVoltageData(); // Okunan verileri UART ile gönder
-        HAL_Delay(10); // Kısa bir gecikme, verileri sürekli göndermemek için (bu da duruma göre değiştirilebilir)
+        sendVoltageData(); // Okunan verileri USB CDC ile gönder
+        HAL_Delay(1000); // 1 saniye gecikme
     }
+}
+
+// Sistem ve diğer ayar fonksiyonları
+void SystemClock_Config(void) {
+    // Clock yapılandırma ayarları (CubeMX tarafından otomatik eklenir)
+}
+
+void MX_GPIO_Init(void) {
+    // GPIO ayarları (CubeMX tarafından otomatik eklenir)
+}
+
+void MX_I2C1_Init(void) {
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.ClockSpeed = 100000;
+    hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+    hi2c1.Init.OwnAddress1 = 0;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+    HAL_I2C_Init(&hi2c1);
 }
